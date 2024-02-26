@@ -1,4 +1,8 @@
-#include <map>
+#include <shared_mutex>
+#include <future>
+#include <stdexcept>
+#include <memory>
+#include <unordered_map>
 
 #include "images.hpp"
 
@@ -10,43 +14,34 @@ namespace utility
     public:
         // Returns image by path. If image is not in cache, it will be loaded from remote storage
         // raise exception if image is not found
-        some_library::images::Image *GetImage(const std::string n)
-        {
-            std::lock_guard<std::mutex> lock(m);
-            for (auto item : storage)
-            {
-                if (item.first == n)
-                {
-                    return item.second;
-                }
+        std::shared_ptr<some_library::images::Image> GetImage(const std::string& name) {
+            std::shared_lock<std::shared_mutex> ReadLock(m);
+            auto it = storage.find(name);
+            if (it != storage.end()) {
+                return it->second; 
             }
-            storage[n] = some_library::images::storage::LoadImage(n);
-            if (storage[n] == nullptr)
-            {
-                throw std::runtime_error("image not found");
-            }
-            return storage[n];
-        }
+            ReadLock.unlock(); 
 
+            auto imgFuture = std::async(std::launch::async, [this, &name] {
+                auto img = some_library::images::storage::LoadImage(name);
+                if (!img) {
+                    throw std::runtime_error("Image not found: " + name);
+                }
+                std::unique_lock<std::shared_mutex> writeLock(m); 
+                return storage.emplace(name, std::shared_ptr<some_library::images::Image>(img)).first->second;
+            });
+
+            return imgFuture.get(); 
+        }
         // Clears the cache
-        void Clear()
-        {
-            std::lock_guard<std::mutex> lock(m);
-            for (auto item : storage)
-            {
-                some_library::images::storage::ReleaseImage(item.second);
-            }
+        void Clear() {
+            std::unique_lock<std::shared_mutex> lock(m);
             storage.clear();
         }
 
-        ~ImageCache()
-        {
-            Clear();
-        }
-
     private:
-        std::map<std::string, some_library::images::Image *> storage;
-        std::mutex m;
+        mutable std::unordered_map<std::string, std::shared_ptr<some_library::images::Image>> storage;
+        mutable std::shared_mutex m; 
     };
 
 } // namespace utility
